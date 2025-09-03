@@ -214,7 +214,6 @@ training_args = Seq2SeqTrainingArguments(
     logging_dir="./logs",
     # Disable features that use extra memory
     ddp_find_unused_parameters=False,
-    dataloader_drop_last=True,
 )
 
 trainer = Seq2SeqTrainer(

@@ -19,6 +19,8 @@ print(f"Using device: {device}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name()}")
     print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+else:
+    print("Running on CPU - optimizing for Azure VM")
 
 # -------------------
 # 2. Load datasets
@@ -34,7 +36,8 @@ print(f"Val samples: {len(val_dataset)}")
 # 3. Load model & processor
 # -------------------
 print("Loading model and processor...")
-processor = DonutProcessor.from_pretrained(MODEL_NAME)
+# Force use of slow tokenizer to avoid sentencepiece dependency
+processor = DonutProcessor.from_pretrained(MODEL_NAME, use_fast=False)
 model = VisionEncoderDecoderModel.from_pretrained(MODEL_NAME)
 
 # Fix Donut model configuration
@@ -42,7 +45,7 @@ model.config.decoder_start_token_id = processor.tokenizer.bos_token_id
 model.config.pad_token_id = processor.tokenizer.pad_token_id
 model.config.eos_token_id = processor.tokenizer.eos_token_id
 
-# Move model to GPU
+# Move model to device
 model = model.to(device)
 print(f"Model moved to {device}")
 print(f"Decoder start token ID: {model.config.decoder_start_token_id}")
@@ -101,9 +104,9 @@ def collate_fn(batch):
     }
 
 # -------------------
-# 5. Training setup - Optimized for GPU
+# 5. Training setup - Optimized for CPU/Azure VM
 # -------------------
-# Calculate optimal batch size based on GPU memory
+# Calculate optimal batch size based on device
 if torch.cuda.is_available():
     gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
     if gpu_memory_gb >= 24:  # 24GB+ GPU (RTX 4090, A100, etc.)
@@ -119,8 +122,9 @@ if torch.cuda.is_available():
         batch_size = 1
         gradient_accumulation_steps = 32
 else:
+    # CPU settings for Azure VM
     batch_size = 1
-    gradient_accumulation_steps = 32
+    gradient_accumulation_steps = 16  # Smaller for CPU
 
 print(f"Using batch size: {batch_size}, gradient accumulation steps: {gradient_accumulation_steps}")
 
@@ -128,27 +132,32 @@ training_args = Seq2SeqTrainingArguments(
     output_dir=OUTPUT_DIR,
     eval_strategy="steps",
     save_strategy="steps",
-    save_steps=500,
-    eval_steps=500,
-    logging_steps=100,
+    save_steps=200,  # More frequent saves for CPU training
+    eval_steps=200,
+    logging_steps=50,  # More frequent logging
     per_device_train_batch_size=batch_size,
     per_device_eval_batch_size=batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    num_train_epochs=10,
-    learning_rate=5e-5,
+    num_train_epochs=5,  # Reduced epochs for CPU training
+    learning_rate=3e-5,  # Slightly lower learning rate for CPU
     save_total_limit=2,
     predict_with_generate=True,
     remove_unused_columns=False,
-    fp16=True,  # Mixed precision for speed and memory efficiency
-    dataloader_pin_memory=False,  # Disable pin memory to reduce CPU RAM usage
-    dataloader_num_workers=0,  # Single worker to avoid memory issues
-    report_to="none",  # disable wandb/hf logging unless you want it
+    fp16=False,  # Disable mixed precision for CPU
+    dataloader_pin_memory=False,
+    dataloader_num_workers=0,
+    report_to="none",
     # Memory optimization
-    gradient_checkpointing=True,  # Trade compute for memory
-    optim="adamw_torch",  # Use PyTorch optimizer for better memory efficiency
-    warmup_steps=100,  # Gradual warmup to avoid memory spikes
-    # GPU specific optimizations
-    dataloader_prefetch_factor=None,  # Disable prefetching to save memory
+    gradient_checkpointing=True,
+    optim="adamw_torch",
+    warmup_steps=50,  # Reduced warmup for CPU
+    # CPU specific optimizations
+    dataloader_prefetch_factor=None,
+    # Additional CPU optimizations
+    dataloader_drop_last=True,  # Drop incomplete batches
+    load_best_model_at_end=True,  # Load best model at end
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
 )
 
 trainer = Seq2SeqTrainer(
@@ -166,8 +175,9 @@ trainer = Seq2SeqTrainer(
 if __name__ == "__main__":
     print("Starting training...")
     print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
+    print("Training on CPU - this will take longer but will work!")
     
-    # Clear GPU cache before training
+    # Clear cache if GPU available
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     
